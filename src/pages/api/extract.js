@@ -1,10 +1,16 @@
 import * as cheerio from "cheerio";
 
 export default async function handler(req, res) {
-  const { url } = req.query;
-  if (!url || typeof url !== "string") return res.status(400).json({ error: "url required" });
+  // --- CORS ---
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  if (req.method === "OPTIONS") return res.status(200).end();
 
   try {
+    const { url } = req.query;
+    if (!url || typeof url !== "string") return res.status(400).json({ error: "url required" });
+
     const html = await (await fetch(url)).text();
     const $ = cheerio.load(html);
     const text = $("body").text().replace(/\s+/g, " ");
