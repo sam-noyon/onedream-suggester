@@ -1,56 +1,55 @@
-const CSE = `https://www.googleapis.com/customsearch/v1`;
-
+// src/pages/api/search-programs.js
 export default async function handler(req, res) {
-  // ---- CORS ----
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET,OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-  if (req.method === "OPTIONS") {
-    return res.status(204).end(); // preflight
-  }
-
-  // ... your existing code (fetch Google, parse, res.status(200).json(...))
-}
-
-
+  if (req.method === "OPTIONS") return res.status(204).end();
 
   try {
-    const { country = "finland", field = "", degree = "", english = "yes" } = req.query;
+    const {
+      country = "denmark",
+      field = "Computer Science",
+      degree = "Bachelor",
+      english = "yes",
+    } = req.query;
 
-    const countryFilters = {
-      finland: '(site:studyinfinland.fi OR site:opintopolku.fi OR site:migri.fi)',
-      denmark: '(site:nyidanmark.dk OR site:ufm.dk OR site:studyindenmark.dk OR site:ku.dk OR site:dtu.dk OR site:sdu.dk OR site:aau.dk OR site:au.dk OR site:itu.dk)',
-      italy: '(site:universitaly.it OR site:studyinitaly.esteri.it)',
-      germany: '(site:daad.de)',
-      malaysia: '(site:studyinmalaysia.com)'
+    const domains = {
+      denmark: ["studyindenmark.dk","nyidanmark.dk","ufm.dk","ku.dk","dtu.dk","sdu.dk","aau.dk","au.dk","itu.dk"],
+      finland: ["studyinfinland.fi","opintopolku.fi","migri.fi","helsinki.fi","aalto.fi","tuni.fi","lut.fi","oulu.fi","utu.fi"],
+      germany: ["daad.de","tum.de","uni-heidelberg.de","tu-dresden.de"],
+      italy: ["universitaly.it","studyinitaly.esteri.it","polimi.it","unibo.it","unimi.it"],
+      malaysia: ["studyinmalaysia.com","utm.my","um.edu.my","upm.edu.my"],
     };
 
-    const deg = String(degree).toLowerCase();
-    const levelHint = deg.includes("bachelor") ? "Bachelor" : deg.includes("master") ? "Master" : "";
-    const langHint = english === "yes" ? '("taught in English" OR English)' : "";
+    const sites = (domains[country] || []).map(d => `site:${d}`).join(" OR ");
+    const englishBit = english === "yes" ? '("taught in English" OR English)' : "";
+    const query = `${sites} ${field} ${degree} ${englishBit} ECTS`.trim();
 
-    const q = [
-      countryFilters[String(country).toLowerCase()] || "",
-      field,
-      levelHint,
-      langHint,
-      "ECTS"
-    ].filter(Boolean).join(" ");
+    const params = new URLSearchParams({
+      key: process.env.GOOGLE_CSE_KEY ?? "",
+      cx:  process.env.GOOGLE_CSE_CX  ?? "",
+      q:   query,
+      num: "10",
+      safe:"active",
+    });
 
-    const url = `${CSE}?key=${process.env.GOOGLE_CSE_KEY}&cx=${process.env.GOOGLE_CSE_CX}&q=${encodeURIComponent(q)}&num=10`;
+    const apiUrl = `https://www.googleapis.com/customsearch/v1?${params.toString()}`;
+    const r = await fetch(apiUrl);
+    if (!r.ok) {
+      const body = await r.text();
+      return res.status(r.status).json({ items: [], error: "google_error", body: body.slice(0,300) });
+    }
 
-    const r = await fetch(url);
-    const data = await r.json();
-
-    const items = (data.items || []).map((i) => ({
-      title: i.title,
-      link: i.link,
-      snippet: i.snippet,
-      displayLink: i.displayLink
+    const json = await r.json();
+    const items = (json.items || []).map(it => ({
+      title: it.title,
+      link: it.link,
+      snippet: it.snippet,
+      displayLink: it.displayLink,
     }));
 
-    res.status(200).json({ q, items, rawError: data.error || null });
+    return res.status(200).json({ items });
   } catch (err) {
-    res.status(500).json({ error: "search_failed", detail: String(err) });
+    return res.status(500).json({ error: "search_failed", detail: String(err) });
   }
 }
