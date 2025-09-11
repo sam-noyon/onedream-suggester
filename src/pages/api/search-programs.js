@@ -1,55 +1,127 @@
 // src/pages/api/search-programs.js
-export default async function handler(req, res) {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET,OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-  if (req.method === "OPTIONS") return res.status(204).end();
 
-  try {
-    const {
-      country = "denmark",
-      field = "Computer Science",
-      degree = "Bachelor",
-      english = "yes",
-    } = req.query;
+const KEYS = (process.env.CSE_KEYS || "")
+  .split(",")
+  .map(s => s.trim())
+  .filter(Boolean);
 
-    const domains = {
-      denmark: ["studyindenmark.dk","nyidanmark.dk","ufm.dk","ku.dk","dtu.dk","sdu.dk","aau.dk","au.dk","itu.dk"],
-      finland: ["studyinfinland.fi","opintopolku.fi","migri.fi","helsinki.fi","aalto.fi","tuni.fi","lut.fi","oulu.fi","utu.fi"],
-      germany: ["daad.de","tum.de","uni-heidelberg.de","tu-dresden.de"],
-      italy: ["universitaly.it","studyinitaly.esteri.it","polimi.it","unibo.it","unimi.it"],
-      malaysia: ["studyinmalaysia.com","utm.my","um.edu.my","upm.edu.my"],
-    };
+const CX = process.env.CSE_CX || ""; // your Search engine ID
 
-    const sites = (domains[country] || []).map(d => `site:${d}`).join(" OR ");
-    const englishBit = english === "yes" ? '("taught in English" OR English)' : "";
-    const query = `${sites} ${field} ${degree} ${englishBit} ECTS`.trim();
+const COUNTRY_TLDS = {
+  denmark: "site:.dk",
+  finland: "site:.fi",
+  germany: "site:.de",
+  italy: "site:.it",
+  france: "site:.fr",
+  spain: "site:.es",
+  ireland: "site:.ie",
+  netherlands: "site:.nl",
+  sweden: "site:.se",
+  malaysia: "site:.my",
+  uk: "(site:.ac.uk OR site:.uk)"
+};
 
-    const params = new URLSearchParams({
-      key: process.env.GOOGLE_CSE_KEY ?? "",
-      cx:  process.env.GOOGLE_CSE_CX  ?? "",
-      q:   query,
+// Build a focused query leaning toward official subject pages
+function buildQuery({ country, field, degree, english }) {
+  const parts = [];
+
+  if (field) parts.push(`"${field}"`);
+  // Prefer programme/program/study/course words
+  parts.push("(programme OR program OR study OR studies OR course)");
+  if (degree?.toLowerCase() === "master") parts.push("(master OR msc)");
+  if (degree?.toLowerCase() === "bachelor") parts.push("(bachelor OR bsc)");
+  if (english === "yes") parts.push("english");
+
+  // Prefer university domains in the selected country
+  if (country && COUNTRY_TLDS[country]) parts.push(COUNTRY_TLDS[country]);
+
+  // Reduce brochures/news noise a bit
+  parts.push("-brochure -pdf -news");
+
+  return parts.join(" ");
+}
+
+async function googleCSE(query, key) {
+  const url =
+    "https://www.googleapis.com/customsearch/v1?" +
+    new URLSearchParams({
+      key,
+      cx: CX,
+      q: query,
       num: "10",
-      safe:"active",
-    });
+      safe: "active"
+    }).toString();
 
-    const apiUrl = `https://www.googleapis.com/customsearch/v1?${params.toString()}`;
-    const r = await fetch(apiUrl);
-    if (!r.ok) {
-      const body = await r.text();
-      return res.status(r.status).json({ items: [], error: "google_error", body: body.slice(0,300) });
+  const r = await fetch(url, { headers: { Accept: "application/json" } });
+
+  // If quota or rate limited, surface it to the rotator
+  if (r.status === 429 || r.status === 403) {
+    const body = await r.json().catch(() => ({}));
+    const reason =
+      body?.error?.errors?.[0]?.reason ||
+      body?.error?.status ||
+      String(r.status);
+    const err = new Error(reason);
+    err._quota = true;
+    throw err;
+  }
+
+  if (!r.ok) {
+    const txt = await r.text().catch(() => "");
+    throw new Error(`CSE error ${r.status}: ${txt.slice(0, 200)}`);
+  }
+  return r.json();
+}
+
+// Try each key until one works (or all are exhausted)
+async function callWithRotation(query) {
+  if (!CX || !KEYS.length) {
+    throw new Error("Missing env: CSE_CX or CSE_KEYS");
+  }
+
+  let lastErr;
+  for (let i = 0; i < KEYS.length; i++) {
+    try {
+      return await googleCSE(query, KEYS[i]);
+    } catch (e) {
+      lastErr = e;
+      // rotate only on quota/rate errors, otherwise stop immediately
+      if (!e?._quota) throw e;
     }
+  }
+  // Nothing left
+  const err = new Error(
+    `All CSE keys exhausted: ${lastErr ? lastErr.message : "unknown"}`
+  );
+  err._exhausted = true;
+  throw err;
+}
 
-    const json = await r.json();
-    const items = (json.items || []).map(it => ({
+export default async function handler(req, res) {
+  try {
+    const country = String(req.query.country || "").toLowerCase();
+    const field = String(req.query.field || "");
+    const degree = String(req.query.degree || "");
+    const english = String(req.query.english || "");
+
+    const query = buildQuery({ country, field, degree, english });
+    const data = await callWithRotation(query);
+
+    const items = (data.items || []).map(it => ({
       title: it.title,
       link: it.link,
       snippet: it.snippet,
-      displayLink: it.displayLink,
+      displayLink: it.displayLink
     }));
 
-    return res.status(200).json({ items });
-  } catch (err) {
-    return res.status(500).json({ error: "search_failed", detail: String(err) });
+    res.status(200).json({ items });
+  } catch (e) {
+    // Keep your frontend stable: deliver empty list + a hint
+    const message = String(e.message || e);
+    const exhausted = !!e?._exhausted;
+
+    res
+      .status(200)
+      .json({ items: [], error: exhausted ? "quota_exhausted" : "cse_error", detail: message });
   }
 }
